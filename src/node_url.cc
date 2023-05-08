@@ -125,32 +125,20 @@ void BindingData::CanParse(const FunctionCallbackInfo<Value>& args) {
 
   Environment* env = Environment::GetCurrent(args);
   HandleScope handle_scope(env->isolate());
-  Context::Scope context_scope(env->context());
 
   Utf8Value input(env->isolate(), args[0]);
-  ada::result<ada::url_aggregator> base;
-  ada::url_aggregator* base_pointer = nullptr;
+  std::string_view base;
+  std::string_view* base_ptr = nullptr;
   if (args[1]->IsString()) {
-    base = ada::parse<ada::url_aggregator>(
-        Utf8Value(env->isolate(), args[1]).ToString());
-    if (!base) {
-      return args.GetReturnValue().Set(false);
-    }
-    base_pointer = &base.value();
+    base = Utf8Value(env->isolate(), args[1]).ToStringView();
+    base_ptr = &base;
   }
-  auto out =
-      ada::parse<ada::url_aggregator>(input.ToStringView(), base_pointer);
-
-  args.GetReturnValue().Set(out.has_value());
+  args.GetReturnValue().Set(ada::can_parse(input.ToStringView(), base_ptr));
 }
 
 bool BindingData::FastCanParse(Local<Value> receiver,
                                const FastOneByteString& input) {
-  std::string_view input_view(input.data, input.length);
-
-  auto output = ada::parse<ada::url_aggregator>(input_view);
-
-  return output.has_value();
+  return ada::can_parse(std::string_view(input.data, input.length));
 }
 
 CFunction BindingData::fast_can_parse_(CFunction::Make(FastCanParse));
