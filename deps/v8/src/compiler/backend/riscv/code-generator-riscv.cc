@@ -629,8 +629,7 @@ void CodeGenerator::BailoutIfDeoptimized() {
   int offset = InstructionStream::kCodeOffset - InstructionStream::kHeaderSize;
   __ LoadTaggedField(kScratchReg,
                      MemOperand(kJavaScriptCallCodeStartRegister, offset));
-  __ Lw(kScratchReg,
-        FieldMemOperand(kScratchReg, Code::kKindSpecificFlagsOffset));
+  __ Lw(kScratchReg, FieldMemOperand(kScratchReg, Code::kFlagsOffset));
   __ And(kScratchReg, kScratchReg,
          Operand(1 << Code::kMarkedForDeoptimizationBit));
   __ Jump(BUILTIN_CODE(isolate(), CompileLazyDeoptimizedCode),
@@ -661,7 +660,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchCallBuiltinPointer: {
       DCHECK(!instr->InputAt(0)->IsImmediate());
       Register builtin_index = i.InputRegister(0);
-      __ CallBuiltinByIndex(builtin_index);
+      Register target =
+          instr->HasCallDescriptorFlag(CallDescriptor::kFixedTargetRegister)
+              ? kJavaScriptCallCodeStartRegister
+              : builtin_index;
+      __ CallBuiltinByIndex(builtin_index, target);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -3072,14 +3075,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vfsqrt_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
       break;
     }
-#if V8_TARGET_ARCH_RISCV64
     case kRiscvF64x2Splat: {
       (__ VU).set(kScratchReg, E64, m1);
-      __ fmv_x_d(kScratchReg, i.InputDoubleRegister(0));
-      __ vmv_vx(i.OutputSimd128Register(), kScratchReg);
+      __ vfmv_vf(i.OutputSimd128Register(), i.InputDoubleRegister(0));
       break;
     }
-#endif
     case kRiscvF64x2Abs: {
       __ VU.set(kScratchReg, VSew::E64, Vlmul::m1);
       __ vfabs_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
@@ -3126,17 +3126,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
       break;
     }
-#if V8_TARGET_ARCH_RISCV64
     case kRiscvF64x2ReplaceLane: {
       __ VU.set(kScratchReg, E64, m1);
       __ li(kScratchReg, 0x1 << i.InputInt8(1));
       __ vmv_sx(v0, kScratchReg);
-      __ fmv_x_d(kScratchReg, i.InputSingleRegister(2));
-      __ vmerge_vx(i.OutputSimd128Register(), kScratchReg,
-                   i.InputSimd128Register(0));
+      __ vfmerge_vf(i.OutputSimd128Register(), i.InputSingleRegister(2),
+                    i.InputSimd128Register(0));
       break;
     }
-#endif
     case kRiscvF64x2Lt: {
       __ VU.set(kScratchReg, E64, m1);
       __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));

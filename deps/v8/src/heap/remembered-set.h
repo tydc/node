@@ -21,8 +21,6 @@
 namespace v8 {
 namespace internal {
 
-enum RememberedSetIterationMode { SYNCHRONIZED, NON_SYNCHRONIZED };
-
 class RememberedSetOperations {
  public:
   // Given a page and a slot in that page, this function adds the slot to the
@@ -37,13 +35,13 @@ class RememberedSetOperations {
         offset);
   }
 
-  template <typename Callback>
+  template <AccessMode access_mode = AccessMode::ATOMIC, typename Callback>
   static int Iterate(SlotSet* slot_set, MemoryChunk* chunk, Callback callback,
                      SlotSet::EmptyBucketMode mode) {
     int slots = 0;
     if (slot_set != nullptr) {
-      slots += slot_set->Iterate(chunk->address(), 0, chunk->buckets(),
-                                 callback, mode);
+      slots += slot_set->Iterate<access_mode>(chunk->address(), 0,
+                                              chunk->buckets(), callback, mode);
     }
     return slots;
   }
@@ -83,6 +81,17 @@ class RememberedSetOperations {
             return KEEP_SLOT;
           },
           SlotSet::KEEP_EMPTY_BUCKETS);
+    }
+  }
+
+  // Iterates over all old generation memory chunks.
+  // The callback should take (MemoryChunk* chunk) and return void.
+  template <typename Callback>
+  static void IterateOldMemoryChunks(Heap* heap, Callback callback) {
+    OldGenerationMemoryChunkIterator it(heap);
+    MemoryChunk* chunk;
+    while ((chunk = it.next()) != nullptr) {
+      callback(chunk);
     }
   }
 };
@@ -149,18 +158,6 @@ class RememberedSet : public AllStatic {
     RememberedSetOperations::RemoveRange(slot_set, chunk, start, end, mode);
   }
 
-  // Iterates and filters the remembered set with the given callback.
-  // The callback should take (Address slot) and return SlotCallbackResult.
-  template <typename Callback>
-  static void Iterate(Heap* heap, RememberedSetIterationMode mode,
-                      Callback callback) {
-    IterateMemoryChunks(heap, [mode, callback](MemoryChunk* chunk) {
-      if (mode == SYNCHRONIZED) chunk->mutex()->Lock();
-      Iterate(chunk, callback);
-      if (mode == SYNCHRONIZED) chunk->mutex()->Unlock();
-    });
-  }
-
   // Iterates over all memory chunks that contains non-empty slot sets.
   // The callback should take (MemoryChunk* chunk) and return void.
   template <typename Callback>
@@ -170,8 +167,7 @@ class RememberedSet : public AllStatic {
     while ((chunk = it.next()) != nullptr) {
       SlotSet* slot_set = chunk->slot_set<type>();
       TypedSlotSet* typed_slot_set = chunk->typed_slot_set<type>();
-      if (slot_set != nullptr || typed_slot_set != nullptr ||
-          chunk->invalidated_slots<type>() != nullptr) {
+      if (slot_set != nullptr || typed_slot_set != nullptr) {
         callback(chunk);
       }
     }
@@ -183,11 +179,12 @@ class RememberedSet : public AllStatic {
   //
   // Notice that |mode| can only be of FREE* or PREFREE* if there are no other
   // threads concurrently inserting slots.
-  template <typename Callback>
+  template <AccessMode access_mode = AccessMode::ATOMIC, typename Callback>
   static int Iterate(MemoryChunk* chunk, Callback callback,
                      SlotSet::EmptyBucketMode mode) {
     SlotSet* slot_set = chunk->slot_set<type>();
-    return RememberedSetOperations::Iterate(slot_set, chunk, callback, mode);
+    return RememberedSetOperations::Iterate<access_mode>(slot_set, chunk,
+                                                         callback, mode);
   }
 
   template <typename Callback>
@@ -216,7 +213,7 @@ class RememberedSet : public AllStatic {
   }
 
   static bool CheckPossiblyEmptyBuckets(MemoryChunk* chunk) {
-    DCHECK(type == OLD_TO_NEW);
+    DCHECK(type == OLD_TO_NEW || type == OLD_TO_NEW_BACKGROUND);
     SlotSet* slot_set = chunk->slot_set<type, AccessMode::NON_ATOMIC>();
     if (slot_set != nullptr &&
         slot_set->CheckPossiblyEmptyBuckets(chunk->buckets(),
@@ -242,6 +239,8 @@ class RememberedSet : public AllStatic {
   static void MergeTyped(MemoryChunk* page, std::unique_ptr<TypedSlots> other) {
     TypedSlotSet* slot_set = page->typed_slot_set<type>();
     if (slot_set == nullptr) {
+      CodePageHeaderModificationScope header_modification_scope(
+          "Allocating a typed slot set requires header write permissions.");
       slot_set = page->AllocateTypedSlotSet<type>();
     }
     slot_set->Merge(other.get());
@@ -259,19 +258,6 @@ class RememberedSet : public AllStatic {
           },
           TypedSlotSet::FREE_EMPTY_CHUNKS);
     }
-  }
-
-  // Iterates and filters the remembered set with the given callback.
-  // The callback should take (SlotType slot_type, Address addr) and return
-  // SlotCallbackResult.
-  template <typename Callback>
-  static void IterateTyped(Heap* heap, RememberedSetIterationMode mode,
-                           Callback callback) {
-    IterateMemoryChunks(heap, [mode, callback](MemoryChunk* chunk) {
-      if (mode == SYNCHRONIZED) chunk->mutex()->Lock();
-      IterateTyped(chunk, callback);
-      if (mode == SYNCHRONIZED) chunk->mutex()->Unlock();
-    });
   }
 
   // Iterates and filters typed pointers in the given memory chunk with the
@@ -298,7 +284,6 @@ class RememberedSet : public AllStatic {
       chunk->ReleaseSlotSet<OLD_TO_OLD>();
       chunk->ReleaseSlotSet<OLD_TO_CODE>();
       chunk->ReleaseTypedSlotSet<OLD_TO_OLD>();
-      chunk->ReleaseInvalidatedSlots<OLD_TO_OLD>();
     }
   }
 };
@@ -328,7 +313,7 @@ class UpdateTypedSlotHelper {
     SlotCallbackResult result = callback(FullMaybeObjectSlot(&code));
     DCHECK(!HasWeakHeapObjectTag(code));
     if (code != old_code) {
-      base::Memory<Address>(entry_address) = code.entry();
+      base::Memory<Address>(entry_address) = code.instruction_start();
     }
     return result;
   }
@@ -362,7 +347,7 @@ class UpdateTypedSlotHelper {
     SlotCallbackResult result = callback(FullMaybeObjectSlot(&new_target));
     DCHECK(!HasWeakHeapObjectTag(new_target));
     if (new_target != old_target) {
-      rinfo->set_target_object(heap, HeapObject::cast(new_target));
+      rinfo->set_target_object(HeapObject::cast(new_target));
     }
     return result;
   }

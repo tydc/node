@@ -68,29 +68,23 @@ bool HasExternalForwardingIndex(Isolate* isolate, Handle<String> string) {
 }  // namespace
 
 void ExternalizeStringExtension::Externalize(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  if (args.Length() < 1 || !args[0]->IsString()) {
-    args.GetIsolate()->ThrowError(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  DCHECK(ValidateCallbackInfo(info));
+  if (info.Length() < 1 || !info[0]->IsString()) {
+    info.GetIsolate()->ThrowError(
         "First parameter to externalizeString() must be a string.");
     return;
   }
-  bool force_two_byte = false;
-  if (args.Length() >= 2) {
-    if (args[1]->IsBoolean()) {
-      force_two_byte = args[1]->BooleanValue(args.GetIsolate());
-    } else {
-      args.GetIsolate()->ThrowError(
-          "Second parameter to externalizeString() must be a boolean.");
-      return;
-    }
-  }
   bool result = false;
-  Handle<String> string = Utils::OpenHandle(*args[0].As<v8::String>());
-  if (!string->SupportsExternalization()) {
-    args.GetIsolate()->ThrowError("string does not support externalization.");
+  Handle<String> string = Utils::OpenHandle(*info[0].As<v8::String>());
+  const bool externalize_as_one_byte = string->IsOneByteRepresentation();
+  if (!string->SupportsExternalization(
+          externalize_as_one_byte ? v8::String::Encoding::ONE_BYTE_ENCODING
+                                  : v8::String::Encoding::TWO_BYTE_ENCODING)) {
+    info.GetIsolate()->ThrowError("string does not support externalization.");
     return;
   }
-  if (string->IsOneByteRepresentation() && !force_two_byte) {
+  if (externalize_as_one_byte) {
     uint8_t* data = new uint8_t[string->length()];
     String::WriteToFlat(*string, data, 0, string->length());
     SimpleOneByteStringResource* resource = new SimpleOneByteStringResource(
@@ -111,23 +105,23 @@ void ExternalizeStringExtension::Externalize(
   // sometimes failing if another thread won and already forwarded the string to
   // the external resource. Don't consider those races as failures.
   if (!result && !HasExternalForwardingIndex(
-                     reinterpret_cast<Isolate*>(args.GetIsolate()), string)) {
-    args.GetIsolate()->ThrowError("externalizeString() failed.");
+                     reinterpret_cast<Isolate*>(info.GetIsolate()), string)) {
+    info.GetIsolate()->ThrowError("externalizeString() failed.");
     return;
   }
 }
 
-
 void ExternalizeStringExtension::IsOneByte(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  if (args.Length() != 1 || !args[0]->IsString()) {
-    args.GetIsolate()->ThrowError(
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  DCHECK(ValidateCallbackInfo(info));
+  if (info.Length() != 1 || !info[0]->IsString()) {
+    info.GetIsolate()->ThrowError(
         "isOneByteString() requires a single string argument.");
     return;
   }
   bool is_one_byte =
-      Utils::OpenHandle(*args[0].As<v8::String>())->IsOneByteRepresentation();
-  args.GetReturnValue().Set(is_one_byte);
+      Utils::OpenHandle(*info[0].As<v8::String>())->IsOneByteRepresentation();
+  info.GetReturnValue().Set(is_one_byte);
 }
 
 }  // namespace internal

@@ -79,7 +79,6 @@
   V(Projection)             \
   V(Retain)                 \
   V(MapGuard)               \
-  V(FoldConstant)           \
   V(TypeGuard)              \
   V(EnterMachineGraph)      \
   V(ExitMachineGraph)
@@ -758,6 +757,7 @@
   V(Load)                                \
   V(LoadImmutable)                       \
   V(Store)                               \
+  V(StorePair)                           \
   V(StackSlot)                           \
   V(Word32Popcnt)                        \
   V(Word64Popcnt)                        \
@@ -1081,16 +1081,48 @@
 
 // SIMD256 for AVX
 #define MACHINE_SIMD256_OP_LIST(V) \
+  V(F64x4Add)                      \
   V(F32x8Add)                      \
+  V(I64x4Add)                      \
+  V(I32x8Add)                      \
+  V(I16x16Add)                     \
+  V(I8x32Add)                      \
+  V(F64x4Sub)                      \
   V(F32x8Sub)                      \
+  V(I64x4Sub)                      \
+  V(I32x8Sub)                      \
+  V(I16x16Sub)                     \
+  V(I8x32Sub)                      \
+  V(F64x4Mul)                      \
   V(F32x8Mul)                      \
+  V(I64x4Mul)                      \
+  V(I32x8Mul)                      \
+  V(I16x16Mul)                     \
+  V(F64x4Div)                      \
   V(F32x8Div)                      \
+  V(I16x16AddSatS)                 \
+  V(I8x32AddSatS)                  \
+  V(I16x16AddSatU)                 \
+  V(I8x32AddSatU)                  \
+  V(I16x16SubSatS)                 \
+  V(I8x32SubSatS)                  \
+  V(I16x16SubSatU)                 \
+  V(I8x32SubSatU)                  \
   V(F32x8Pmin)                     \
   V(F32x8Pmax)                     \
   V(F32x8Eq)                       \
   V(F32x8Ne)                       \
   V(F32x8Lt)                       \
   V(F32x8Le)                       \
+  V(F64x4ConvertI32x4S)            \
+  V(F32x8SConvertI32x8)            \
+  V(F32x4DemoteF64x4)              \
+  V(I64x4SConvertI32x4)            \
+  V(I64x4UConvertI32x4)            \
+  V(I32x8SConvertI16x8)            \
+  V(I32x8UConvertI16x8)            \
+  V(I16x16SConvertI8x16)           \
+  V(I16x16UConvertI8x16)           \
   V(S256Select)                    \
   V(ExtractF128)
 

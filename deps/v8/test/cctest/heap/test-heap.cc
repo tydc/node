@@ -50,6 +50,7 @@
 #include "src/heap/heap-verifier.h"
 #include "src/heap/incremental-marking.h"
 #include "src/heap/large-spaces.h"
+#include "src/heap/mark-compact-inl.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap/marking-barrier.h"
 #include "src/heap/marking-state-inl.h"
@@ -564,8 +565,7 @@ TEST(WeakGlobalHandlesMark) {
   }
 
   // Make sure the objects are promoted.
-  CcTest::CollectGarbage(OLD_SPACE);
-  CcTest::CollectGarbage(NEW_SPACE);
+  heap::EmptyNewSpaceUsingGC(isolate->heap());
   CHECK(!Heap::InYoungGeneration(*h1) && !Heap::InYoungGeneration(*h2));
 
   std::pair<Handle<Object>*, int> handle_and_id(&h2, 1234);
@@ -656,6 +656,8 @@ TEST(BytecodeArray) {
   // evacuation candidate.
   Page* evac_page = Page::FromHeapObject(*constant_pool);
   heap::ForceEvacuationCandidate(evac_page);
+  // We need to invoke GC without stack, otherwise no compaction is performed.
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
   CcTest::CollectAllGarbage();
 
   // BytecodeArray should survive.
@@ -687,11 +689,7 @@ TEST(BytecodeArrayAging) {
                                 kParameterCount, factory->empty_fixed_array());
 
   CHECK_EQ(0, array->bytecode_age());
-  array->MakeOlder();
-  CHECK_EQ(1, array->bytecode_age());
-  array->set_bytecode_age(v8_flags.bytecode_old_age);
-  array->MakeOlder();
-  CHECK_EQ(v8_flags.bytecode_old_age, array->bytecode_age());
+  array->EnsureOldForTesting();
 }
 
 static const char* not_so_random_string_table[] = {
@@ -1134,11 +1132,8 @@ TEST(TestBytecodeFlushing) {
     CcTest::CollectAllGarbage();
     CHECK(function->shared().is_compiled());
 
-    // Simulate several GCs that use full marking.
-    const int kAgingThreshold = 6;
-    for (int i = 0; i < kAgingThreshold; i++) {
-      CcTest::CollectAllGarbage();
-    }
+    function->shared().GetBytecodeArray(i_isolate).EnsureOldForTesting();
+    CcTest::CollectAllGarbage();
 
     // foo should no longer be in the compilation cache
     CHECK(!function->shared().is_compiled());
@@ -1165,6 +1160,7 @@ static void TestMultiReferencedBytecodeFlushing(bool sparkplug_compile) {
   i::v8_flags.flush_bytecode = true;
   i::v8_flags.allow_natives_syntax = true;
 
+  ManualGCScope manual_gc_scope;
   CcTest::InitializeVM();
   v8::Isolate* isolate = CcTest::isolate();
   Isolate* i_isolate = CcTest::i_isolate();
@@ -1210,11 +1206,8 @@ static void TestMultiReferencedBytecodeFlushing(bool sparkplug_compile) {
           i_isolate, copy, Compiler::CLEAR_EXCEPTION, &is_compiled_scope);
     }
 
-    // Simulate several GCs that use full marking.
-    const int kAgingThreshold = 7;
-    for (int i = 0; i < kAgingThreshold; i++) {
-      CcTest::CollectAllGarbage();
-    }
+    shared->GetBytecodeArray(i_isolate).EnsureOldForTesting();
+    CcTest::CollectAllGarbage();
 
     // foo should no longer be in the compilation cache
     CHECK(!shared->is_compiled());
@@ -1279,11 +1272,7 @@ HEAP_TEST(Regress10560) {
 
     // Pre-age bytecode so it will be flushed on next run.
     CHECK(function->shared().HasBytecodeArray());
-    const int kAgingThreshold = 6;
-    for (int i = 0; i < kAgingThreshold; i++) {
-      function->shared().GetBytecodeArray(i_isolate).MakeOlder();
-      if (function->shared().GetBytecodeArray(i_isolate).IsOld()) break;
-    }
+    function->shared().GetBytecodeArray(i_isolate).EnsureOldForTesting();
 
     CHECK(function->shared().GetBytecodeArray(i_isolate).IsOld());
 
@@ -1461,12 +1450,9 @@ TEST(TestOptimizeAfterBytecodeFlushingCandidate) {
   CcTest::CollectAllGarbage();
   CHECK(function->shared().is_compiled());
 
-  // Simulate several GCs that use incremental marking.
-  const int kAgingThreshold = 6;
-  for (int i = 0; i < kAgingThreshold; i++) {
-    heap::SimulateIncrementalMarking(CcTest::heap());
-    CcTest::CollectAllGarbage();
-  }
+  function->shared().GetBytecodeArray(isolate).EnsureOldForTesting();
+  CcTest::CollectAllGarbage();
+
   CHECK(!function->shared().is_compiled());
   CHECK(!function->is_compiled());
 
@@ -1476,13 +1462,8 @@ TEST(TestOptimizeAfterBytecodeFlushingCandidate) {
     CompileRun("foo();");
   }
 
-  // Simulate several GCs that use incremental marking but make sure
-  // the loop breaks once the function is enqueued as a candidate.
-  for (int i = 0; i < kAgingThreshold; i++) {
-    heap::SimulateIncrementalMarking(CcTest::heap());
-    if (function->shared().GetBytecodeArray(CcTest::i_isolate()).IsOld()) break;
-    CcTest::CollectAllGarbage();
-  }
+  function->shared().GetBytecodeArray(isolate).EnsureOldForTesting();
+  heap::SimulateIncrementalMarking(CcTest::heap());
 
   // Force optimization while incremental marking is active and while
   // the function is enqueued as a candidate.
@@ -1602,10 +1583,7 @@ void CompilationCacheCachingBehavior(bool retain_script) {
     Handle<SharedFunctionInfo> shared =
         lookup_result.toplevel_sfi().ToHandleChecked();
     CHECK(shared->HasBytecodeArray());
-    const int kAgingThreshold = 6;
-    for (int i = 0; i < kAgingThreshold; i++) {
-      shared->GetBytecodeArray(CcTest::i_isolate()).MakeOlder();
-    }
+    shared->GetBytecodeArray(CcTest::i_isolate()).EnsureOldForTesting();
   }
 
   CcTest::CollectAllGarbage();
@@ -1644,10 +1622,7 @@ template <typename T>
 void AgeBytecode(v8::Local<T> function_or_script) {
   Handle<SharedFunctionInfo> shared = GetSharedFunctionInfo(function_or_script);
   CHECK(shared->HasBytecodeArray());
-  const int kAgingThreshold = 6;
-  for (int i = 0; i < kAgingThreshold; i++) {
-    shared->GetBytecodeArray(CcTest::i_isolate()).MakeOlder();
-  }
+  shared->GetBytecodeArray(CcTest::i_isolate()).EnsureOldForTesting();
 }
 
 void CompilationCacheRegeneration(bool retain_root_sfi, bool flush_root_sfi,
@@ -3353,9 +3328,10 @@ TEST(ReleaseOverReservedPages) {
   Factory* factory = isolate->factory();
   Heap* heap = isolate->heap();
   v8::HandleScope scope(CcTest::isolate());
+  // We need to invoke GC without stack, otherwise some objects may survive.
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
   // Ensure that the young generation is empty.
-  CcTest::CollectGarbage(NEW_SPACE);
-  CcTest::CollectGarbage(NEW_SPACE);
+  heap::EmptyNewSpaceUsingGC(heap);
   static const int number_of_test_pages = 20;
 
   // Prepare many pages with low live-bytes count.
@@ -3990,7 +3966,9 @@ TEST(LargeObjectSlotRecording) {
 
   heap::SimulateIncrementalMarking(heap, true);
 
-  // Move the evaucation candidate object.
+  // Move the evacuation candidate object.
+  // We need to invoke GC without stack, otherwise no compaction is performed.
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
   CcTest::CollectAllGarbage();
 
   // Verify that the pointers in the large object got updated.
@@ -4540,7 +4518,7 @@ TEST(ObjectsInEagerlyDeoptimizedCodeAreWeak) {
 }
 
 static Handle<InstructionStream> DummyOptimizedCode(Isolate* isolate) {
-  i::byte buffer[i::Assembler::kDefaultBufferSize];
+  uint8_t buffer[i::Assembler::kDefaultBufferSize];
   MacroAssembler masm(isolate, v8::internal::CodeObjectRequired::kYes,
                       ExternalAssemblerBuffer(buffer, sizeof(buffer)));
   CodeDesc desc;
@@ -4960,10 +4938,10 @@ TEST(AddInstructionChangesNewSpacePromotion) {
   v8::Local<v8::Object> global = CcTest::global();
   v8::Local<v8::Function> g = v8::Local<v8::Function>::Cast(
       global->Get(env.local(), v8_str("crash")).ToLocalChecked());
-  v8::Local<v8::Value> args1[] = {v8_num(1)};
+  v8::Local<v8::Value> info1[] = {v8_num(1)};
   heap->DisableInlineAllocation();
   heap->set_allocation_timeout(1);
-  g->Call(env.local(), global, 1, args1).ToLocalChecked();
+  g->Call(env.local(), global, 1, info1).ToLocalChecked();
   CcTest::CollectAllGarbage();
 }
 
@@ -4994,8 +4972,8 @@ TEST(CEntryStubOOM) {
 
 static void InterruptCallback357137(v8::Isolate* isolate, void* data) { }
 
-
-static void RequestInterrupt(const v8::FunctionCallbackInfo<v8::Value>& args) {
+static void RequestInterrupt(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
   CcTest::isolate()->RequestInterrupt(&InterruptCallback357137, nullptr);
 }
 
@@ -5370,7 +5348,7 @@ TEST(NewSpaceAllocationCounter) {
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
   size_t counter1 = heap->NewSpaceAllocationCounter();
-  CcTest::CollectGarbage(OLD_SPACE);  // Ensure new space is empty.
+  heap::EmptyNewSpaceUsingGC(heap);  // Ensure new space is empty.
   const size_t kSize = 1024;
   AllocateInSpace(isolate, kSize, NEW_SPACE);
   size_t counter2 = heap->NewSpaceAllocationCounter();
@@ -5405,9 +5383,8 @@ TEST(OldSpaceAllocationCounter) {
   // Disable LAB, such that calculations with SizeOfObjects() and object size
   // are correct.
   heap->DisableInlineAllocation();
+  heap::EmptyNewSpaceUsingGC(heap);
   size_t counter1 = heap->OldGenerationAllocationCounter();
-  CcTest::CollectGarbage(NEW_SPACE);
-  CcTest::CollectGarbage(NEW_SPACE);
   const size_t kSize = 1024;
   AllocateInSpace(isolate, kSize, OLD_SPACE);
   size_t counter2 = heap->OldGenerationAllocationCounter();
@@ -5433,14 +5410,13 @@ TEST(OldSpaceAllocationCounter) {
   }
 }
 
-
-static void CheckLeak(const v8::FunctionCallbackInfo<v8::Value>& args) {
+static void CheckLeak(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = CcTest::i_isolate();
   Object message(
       *reinterpret_cast<Address*>(isolate->pending_message_address()));
   CHECK(message.IsTheHole(isolate));
 }
-
 
 TEST(MessageObjectLeak) {
   CcTest::InitializeVM();
@@ -5472,27 +5448,26 @@ TEST(MessageObjectLeak) {
   CompileRun(test);
 }
 
-
 static void CheckEqualSharedFunctionInfos(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  Handle<Object> obj1 = v8::Utils::OpenHandle(*args[0]);
-  Handle<Object> obj2 = v8::Utils::OpenHandle(*args[1]);
+    const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
+  Handle<Object> obj1 = v8::Utils::OpenHandle(*info[0]);
+  Handle<Object> obj2 = v8::Utils::OpenHandle(*info[1]);
   Handle<JSFunction> fun1 = Handle<JSFunction>::cast(obj1);
   Handle<JSFunction> fun2 = Handle<JSFunction>::cast(obj2);
   CHECK(fun1->shared() == fun2->shared());
 }
 
-
-static void RemoveCodeAndGC(const v8::FunctionCallbackInfo<v8::Value>& args) {
+static void RemoveCodeAndGC(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  CHECK(i::ValidateCallbackInfo(info));
   Isolate* isolate = CcTest::i_isolate();
-  Handle<Object> obj = v8::Utils::OpenHandle(*args[0]);
+  Handle<Object> obj = v8::Utils::OpenHandle(*info[0]);
   Handle<JSFunction> fun = Handle<JSFunction>::cast(obj);
   // Bytecode is code too.
   SharedFunctionInfo::DiscardCompiled(isolate, handle(fun->shared(), isolate));
   fun->set_code(*BUILTIN_CODE(isolate, CompileLazy));
   CcTest::CollectAllAvailableGarbage();
 }
-
 
 TEST(CanonicalSharedFunctionInfo) {
   CcTest::InitializeVM();
@@ -5959,10 +5934,10 @@ TEST(Regress631969) {
   heap::SimulateIncrementalMarking(heap, false);
 
   // Allocate a cons string and promote it to a fresh page in the old space.
-  heap::SimulateFullSpace(heap->old_space());
   Handle<String> s3 = factory->NewConsString(s1, s2).ToHandleChecked();
-  CcTest::CollectGarbage(NEW_SPACE);
-  CcTest::CollectGarbage(NEW_SPACE);
+  heap::EmptyNewSpaceUsingGC(heap);
+
+  heap::SimulateIncrementalMarking(heap, false);
 
   // Finish incremental marking.
   const double kStepSizeInMs = 100;
@@ -6017,8 +5992,8 @@ TEST(ContinuousRightTrimFixedArrayInBlackArea) {
   NonAtomicMarkingState* marking_state = heap->non_atomic_marking_state();
   CHECK(marking_state->IsMarked(*array));
   CHECK(marking_state->bitmap(page)->AllBitsSetInRange(
-      page->AddressToMarkbitIndex(start_address),
-      page->AddressToMarkbitIndex(end_address)));
+      MarkingBitmap::AddressToIndex(start_address),
+      MarkingBitmap::LimitAddressToIndex(end_address)));
   CHECK(heap->old_space()->Contains(*array));
 
   // Trim it once by one word to make checking for white marking color uniform.
@@ -6027,7 +6002,6 @@ TEST(ContinuousRightTrimFixedArrayInBlackArea) {
 
   HeapObject filler = HeapObject::FromAddress(previous);
   CHECK(filler.IsFreeSpaceOrFiller());
-  CHECK(marking_state->IsImpossible(filler));
 
   // Trim 10 times by one, two, and three word.
   for (int i = 1; i <= 3; i++) {
@@ -6262,9 +6236,6 @@ TEST(RememberedSet_RemoveStaleOnScavenge) {
   }
   CHECK_EQ(3, GetRememberedSetSize<OLD_TO_NEW>(*arr));
 
-  // Run scavenger once so the young object becomes ready for promotion on the
-  // next pass.
-  CcTest::CollectGarbage(i::NEW_SPACE);
   arr->set(1, ReadOnlyRoots(CcTest::heap()).undefined_value());
   Handle<FixedArrayBase> tail =
       Handle<FixedArrayBase>(heap->LeftTrimFixedArray(*arr, 1), isolate);
@@ -6274,7 +6245,7 @@ TEST(RememberedSet_RemoveStaleOnScavenge) {
 
   // Run GC to promote the remaining young object and fixup the stale entries in
   // the remembered set.
-  CcTest::CollectGarbage(i::OLD_SPACE);
+  heap::EmptyNewSpaceUsingGC(heap);
   CHECK_EQ(0, GetRememberedSetSize<OLD_TO_NEW>(*tail));
 }
 
@@ -6313,6 +6284,8 @@ TEST(RememberedSet_OldToOld) {
 
   // This GC pass will evacuate the page with 'arr'/'ref' so it will have to
   // create OLD_TO_OLD remembered set to track the reference.
+  // We need to invoke GC without stack, otherwise no compaction is performed.
+  DisableConservativeStackScanningScopeForTesting no_stack_scanning(heap);
   CcTest::CollectAllGarbage();
   CHECK_NE(prev_location.ptr(), arr->ptr());
 }
@@ -6859,8 +6832,7 @@ TEST(Regress8617) {
       v8::Utils::OpenHandle(*CompileRun("function foo() { return 42; };"
                                         "foo;"));
   if (heap->InYoungGeneration(*foo)) {
-    CcTest::CollectGarbage(NEW_SPACE);
-    CcTest::CollectGarbage(NEW_SPACE);
+    heap::EmptyNewSpaceUsingGC(heap);
   }
   // Step 2. Create an object with a reference to foo in the descriptor array.
   CompileRun(
@@ -6880,8 +6852,7 @@ TEST(Regress8617) {
   CompileRun("obj.bar = 10;");
   // Step 6. Promote the descriptor array to old space. During promotion
   // the Scavenger will not record the slot of foo in the descriptor array.
-  CcTest::CollectGarbage(NEW_SPACE);
-  CcTest::CollectGarbage(NEW_SPACE);
+  heap::EmptyNewSpaceUsingGC(heap);
   // Step 7. Complete the Mark-Compact.
   CcTest::CollectAllGarbage();
   // Step 8. Use the descriptor for foo, which contains a stale pointer.
@@ -6924,7 +6895,6 @@ TEST(CodeObjectRegistry) {
 
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
-  CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
 
   Handle<InstructionStream> code1;
   HandleScope outer_scope(heap->isolate());
@@ -6953,8 +6923,7 @@ TEST(Regress9701) {
   CcTest::InitializeVM();
   Heap* heap = CcTest::heap();
   // Start with an empty new space.
-  CcTest::CollectGarbage(NEW_SPACE);
-  CcTest::CollectGarbage(NEW_SPACE);
+  heap::EmptyNewSpaceUsingGC(heap);
 
   int mark_sweep_count_before = heap->ms_count();
   // Allocate many short living array buffers.
@@ -7068,7 +7037,6 @@ HEAP_TEST(CodeLargeObjectSpace) {
   TestAllocationTracker allocation_tracker{size_in_bytes};
   heap->AddHeapObjectAllocationTracker(&allocation_tracker);
 
-  CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
   HeapObject obj;
   {
     AllocationResult allocation = heap->AllocateRaw(
@@ -7102,7 +7070,6 @@ UNINITIALIZED_HEAP_TEST(CodeLargeObjectSpace64k) {
     TestAllocationTracker allocation_tracker{size_in_bytes};
     heap->AddHeapObjectAllocationTracker(&allocation_tracker);
 
-    CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
     HeapObject obj;
     {
       AllocationResult allocation = heap->AllocateRaw(
@@ -7124,7 +7091,6 @@ UNINITIALIZED_HEAP_TEST(CodeLargeObjectSpace64k) {
     TestAllocationTracker allocation_tracker{size_in_bytes};
     heap->AddHeapObjectAllocationTracker(&allocation_tracker);
 
-    CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
     HeapObject obj;
     {
       AllocationResult allocation = heap->AllocateRaw(
@@ -7202,7 +7168,7 @@ TEST(Regress10900) {
   Isolate* isolate = CcTest::i_isolate();
   Heap* heap = isolate->heap();
   HandleScope handle_scope(isolate);
-  i::byte buffer[i::Assembler::kDefaultBufferSize];
+  uint8_t buffer[i::Assembler::kDefaultBufferSize];
   MacroAssembler masm(isolate, v8::internal::CodeObjectRequired::kYes,
                       ExternalAssemblerBuffer(buffer, sizeof(buffer)));
 #if V8_TARGET_ARCH_ARM64
@@ -7217,8 +7183,6 @@ TEST(Regress10900) {
   CodeDesc desc;
   masm.GetCode(isolate, &desc);
   {
-    CodePageCollectionMemoryModificationScopeForTesting code_scope(
-        isolate->heap());
     Handle<Code> code;
     for (int i = 0; i < 100; i++) {
       // Generate multiple code pages.
